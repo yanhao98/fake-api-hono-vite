@@ -158,4 +158,28 @@ chat.post('/v1/chat/completions', async (c) => {
   })
 })
 
+// Mock models list
+const mockModels = [
+  {
+    id: 'gpt-5-nano',
+    object: 'model',
+    created: 1687882411,
+    owned_by: 'openai'
+  },
+  {
+    id: 'gpt-3.5-turbo',
+    object: 'model',
+    created: 1677610602,
+    owned_by: 'openai'
+  }
+]
+
+// OpenAI Models endpoint
+chat.get('/v1/models', (c) => {
+  return c.json({
+    object: 'list',
+    data: mockModels
+  })
+})
+
 export default chat
