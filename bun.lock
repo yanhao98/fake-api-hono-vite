@@ -2,7 +2,7 @@
   "lockfileVersion": 1,
   "workspaces": {
     "": {
-      "name": "fake-api-vite",
+      "name": "fake-api-hono-vite",
       "dependencies": {
         "hono": "^4.10.1",
       },
