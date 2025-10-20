@@ -27,6 +27,11 @@ function getRandomResponse() {
 // OpenAI Chat Completions endpoint
 chat.post('/v1/chat/completions', async (c) => {
   const body = await c.req.json()
+  console.log('Request:', {
+    url: c.req.url,
+    headers: c.req.header(),
+    body: c.req.json(),
+  })
   const { stream: isStream, model, messages } = body
 
   const chatId = generateChatId()
