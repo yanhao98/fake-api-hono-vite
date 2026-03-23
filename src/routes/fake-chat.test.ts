@@ -43,7 +43,9 @@ describe('POST /v1/chat/completions', () => {
     expect(json.system_fingerprint).toMatch(/^fp_/)
     expect(json.choices).toHaveLength(1)
     expect(json.choices[0].message.role).toBe('assistant')
-    expect(json.choices[0].message.content).toContain('2')
+    expect(json.choices[0].message.content).toBeTypeOf('string')
+    expect(json.choices[0].message.content.length).toBeGreaterThan(0)
+    expect(json.choices[0].message.content).toContain('POST /v1/chat/completions model=gpt-5.4')
     expect(json.choices[0].finish_reason).toBe('stop')
     expect(json.usage.prompt_tokens).toBeGreaterThan(0)
     expect(json.usage.completion_tokens).toBeGreaterThan(0)
@@ -98,13 +100,22 @@ describe('POST /v1/chat/completions', () => {
 
     const usageChunk = JSON.parse(usageLine!.replace('data: ', ''))
     expect(usageChunk.usage.total_tokens).toBeGreaterThan(0)
+
+    const streamedText = lines
+      .filter((line) => line !== 'data: [DONE]')
+      .map((line) => JSON.parse(line.replace('data: ', '')))
+      .flatMap((chunk) => chunk.choices ?? [])
+      .map((choice) => choice.delta?.content ?? '')
+      .join('')
+
+    expect(streamedText).toContain('POST /v1/chat/completions model=gpt-5.4-mini')
     expect(lines.at(-1)).toBe('data: [DONE]')
   })
 })
 
 describe('POST /v1/responses', () => {
   it('returns an OpenAI Responses API payload', async () => {
-    const res = await chat.request('/v1/responses', {
+    const res = await chat.request('/v1/responses?trace=1&provider=openai', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -130,7 +141,9 @@ describe('POST /v1/responses', () => {
     expect(json.output[0].role).toBe('assistant')
     expect(json.output[0].phase).toBe('final_answer')
     expect(json.output[0].content[0].type).toBe('output_text')
-    expect(json.output[0].content[0].text).toContain('2')
+    expect(json.output[0].content[0].text).toBeTypeOf('string')
+    expect(json.output[0].content[0].text.length).toBeGreaterThan(0)
+    expect(json.output[0].content[0].text).toContain('POST /v1/responses?trace=1&provider=openai model=gpt-5.4')
     expect(json.text.format.type).toBe('text')
     expect(json.usage.total_tokens).toBeGreaterThan(0)
   })
@@ -157,7 +170,9 @@ describe('POST /v1beta/models/:model:generateContent', () => {
 
     expect(json.candidates).toHaveLength(1)
     expect(json.candidates[0].content.role).toBe('model')
-    expect(json.candidates[0].content.parts[0].text).toContain('2')
+    expect(json.candidates[0].content.parts[0].text).toBeTypeOf('string')
+    expect(json.candidates[0].content.parts[0].text.length).toBeGreaterThan(0)
+    expect(json.candidates[0].content.parts[0].text).toContain('POST /v1beta/models/gemini-3-flash-preview:generateContent model=gemini-3-flash-preview')
     expect(json.candidates[0].finishReason).toBe('STOP')
     expect(json.modelVersion).toBe('gemini-3-flash-preview')
     expect(json.responseId).toBeTypeOf('string')
@@ -194,9 +209,11 @@ describe('POST /v1/messages', () => {
     expect(json.content).toEqual([
       expect.objectContaining({
         type: 'text',
-        text: expect.stringContaining('2'),
+        text: expect.any(String),
       }),
     ])
+    expect(json.content[0].text.length).toBeGreaterThan(0)
+    expect(json.content[0].text).toContain('POST /v1/messages model=gemini-3-flash-preview')
     expect(json.stop_reason).toBe('end_turn')
     expect(json.stop_sequence).toBeNull()
     expect(json.usage.input_tokens).toBeGreaterThan(0)
