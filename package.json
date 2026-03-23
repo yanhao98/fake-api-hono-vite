@@ -11,15 +11,15 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "hono": "^4.10.1"
+    "hono": "^4.12.8"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.13.13",
+    "@cloudflare/vite-plugin": "^1.30.0",
     "@cloudflare/workers-types": "^4.20260317.1",
     "typescript": "^5.9.3",
-    "vite": "^7.1.11",
-    "vite-ssr-components": "^0.5.1",
+    "vite": "^8.0.1",
+    "vite-ssr-components": "^0.5.2",
     "vitest": "^4.1.0",
-    "wrangler": "^4.43.0"
+    "wrangler": "^4.76.0"
   }
 }
