@@ -1,122 +1,207 @@
-import { describe, it, expect } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import chat from './fake-chat'
 
 describe('GET /v1/models', () => {
-  it('should return model list', async () => {
+  it('returns a mixed provider model list', async () => {
     const res = await chat.request('/v1/models')
     expect(res.status).toBe(200)
 
     const json: any = await res.json()
+
     expect(json.object).toBe('list')
-    expect(json.data).toHaveLength(2)
-    expect(json.data[0]).toMatchObject({
-      id: 'gpt-5-nano',
-      object: 'model',
-      owned_by: 'openai',
-    })
-    expect(json.data[1]).toMatchObject({
-      id: 'gpt-3.5-turbo',
-      object: 'model',
-      owned_by: 'openai',
-    })
+    expect(json.data).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'gpt-5.4', object: 'model', owned_by: 'openai' }),
+        expect.objectContaining({ id: 'gemini-3-flash-preview', object: 'model', owned_by: 'google' }),
+        expect.objectContaining({ id: 'claude-sonnet-4-6', object: 'model', owned_by: 'anthropic' }),
+      ]),
+    )
   })
 })
 
 describe('POST /v1/chat/completions', () => {
-  const requestBody = {
-    model: 'gpt-5-nano',
-    messages: [{ role: 'user', content: 'Hello' }],
-    stream: false,
-  }
-
-  it('should return non-streaming response in OpenAI format', async () => {
+  it('returns a non-streaming OpenAI-style response', async () => {
     const res = await chat.request('/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(requestBody),
+      body: JSON.stringify({
+        model: 'gpt-5.4',
+        messages: [
+          { role: 'system', content: '喜欢用 emoji 回复消息' },
+          { role: 'user', content: 'what is 1+1?' },
+        ],
+      }),
     })
+
     expect(res.status).toBe(200)
 
     const json: any = await res.json()
+
     expect(json.id).toMatch(/^chatcmpl-/)
     expect(json.object).toBe('chat.completion')
-    expect(json.model).toBe('gpt-5-nano')
-    expect(json.created).toBeTypeOf('number')
-
-    // choices
+    expect(json.model).toBe('gpt-5.4')
+    expect(json.system_fingerprint).toMatch(/^fp_/)
     expect(json.choices).toHaveLength(1)
-    const choice = json.choices[0]
-    expect(choice.index).toBe(0)
-    expect(choice.finish_reason).toBe('stop')
-    expect(choice.message.role).toBe('assistant')
-    expect(choice.message.content).toBeTypeOf('string')
-    expect(choice.message.content.length).toBeGreaterThan(0)
-
-    // usage
-    expect(json.usage).toMatchObject({
-      prompt_tokens: 10,
-      completion_tokens: 17,
-      total_tokens: 27,
-    })
+    expect(json.choices[0].message.role).toBe('assistant')
+    expect(json.choices[0].message.content).toContain('2')
+    expect(json.choices[0].finish_reason).toBe('stop')
+    expect(json.usage.prompt_tokens).toBeGreaterThan(0)
+    expect(json.usage.completion_tokens).toBeGreaterThan(0)
+    expect(json.usage.total_tokens).toBe(json.usage.prompt_tokens + json.usage.completion_tokens)
   })
 
-  it('should use default model when not specified', async () => {
+  it('uses the latest default OpenAI model when omitted', async () => {
     const res = await chat.request('/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        messages: [{ role: 'user', content: 'Hi' }],
-        stream: false,
+        messages: [{ role: 'user', content: 'Hello' }],
       }),
     })
+
     const json: any = await res.json()
-    expect(json.model).toBe('gpt-35-turbo')
+    expect(json.model).toBe('gpt-5.4')
   })
 
-  it('should return streaming response with SSE format', async () => {
+  it('streams SSE chunks for chat completions', async () => {
     const res = await chat.request('/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        ...requestBody,
+        model: 'gpt-5.4-mini',
         stream: true,
+        messages: [{ role: 'user', content: 'Hi' }],
       }),
     })
+
     expect(res.status).toBe(200)
 
     const text = await res.text()
-    const lines = text.split('\n').filter((l: string) => l.startsWith('data: '))
+    const lines = text.split('\n').filter((line) => line.startsWith('data: '))
 
-    // Should have: role chunk + character chunks + finish chunk + content_filter chunk + usage chunk + [DONE]
     expect(lines.length).toBeGreaterThanOrEqual(4)
 
-    // First chunk should contain role
     const firstChunk = JSON.parse(lines[0].replace('data: ', ''))
     expect(firstChunk.object).toBe('chat.completion.chunk')
+    expect(firstChunk.model).toBe('gpt-5.4-mini')
     expect(firstChunk.choices[0].delta.role).toBe('assistant')
-    expect(firstChunk.model).toBe('gpt-5-nano')
 
-    // Last line should be [DONE]
-    const lastDataLine = lines[lines.length - 1]
-    expect(lastDataLine).toBe('data: [DONE]')
+    const usageLine = lines.find((line) => {
+      if (line === 'data: [DONE]') {
+        return false
+      }
 
-    // Find the finish_reason chunk
-    const finishChunk = lines.find((l: string) => {
-      if (l === 'data: [DONE]') return false
-      const parsed = JSON.parse(l.replace('data: ', ''))
-      return parsed.choices?.[0]?.finish_reason === 'stop'
+      return JSON.parse(line.replace('data: ', '')).usage !== undefined
     })
-    expect(finishChunk).toBeDefined()
 
-    // Find usage chunk
-    const usageChunk = lines.find((l: string) => {
-      if (l === 'data: [DONE]') return false
-      const parsed = JSON.parse(l.replace('data: ', ''))
-      return parsed.usage !== undefined
+    expect(usageLine).toBeDefined()
+
+    const usageChunk = JSON.parse(usageLine!.replace('data: ', ''))
+    expect(usageChunk.usage.total_tokens).toBeGreaterThan(0)
+    expect(lines.at(-1)).toBe('data: [DONE]')
+  })
+})
+
+describe('POST /v1/responses', () => {
+  it('returns an OpenAI Responses API payload', async () => {
+    const res = await chat.request('/v1/responses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-5.4',
+        instructions: '🍐💩🐷，喜欢用很多 emoji 回复消息。',
+        max_output_tokens: 2048,
+        input: [{ role: 'user', content: 'what is 1+1?' }],
+      }),
     })
-    expect(usageChunk).toBeDefined()
-    const usageData = JSON.parse(usageChunk!.replace('data: ', ''))
-    expect(usageData.usage.prompt_tokens).toBe(10)
-    expect(usageData.usage.total_tokens).toBeGreaterThan(10)
+
+    expect(res.status).toBe(200)
+
+    const json: any = await res.json()
+
+    expect(json.id).toMatch(/^resp_/)
+    expect(json.object).toBe('response')
+    expect(json.status).toBe('completed')
+    expect(json.model).toBe('gpt-5.4')
+    expect(json.instructions).toContain('emoji')
+    expect(json.max_output_tokens).toBe(2048)
+    expect(json.output).toHaveLength(1)
+    expect(json.output[0].type).toBe('message')
+    expect(json.output[0].role).toBe('assistant')
+    expect(json.output[0].phase).toBe('final_answer')
+    expect(json.output[0].content[0].type).toBe('output_text')
+    expect(json.output[0].content[0].text).toContain('2')
+    expect(json.text.format.type).toBe('text')
+    expect(json.usage.total_tokens).toBeGreaterThan(0)
+  })
+})
+
+describe('POST /v1beta/models/:model:generateContent', () => {
+  it('returns a Gemini generateContent payload', async () => {
+    const res = await chat.request('/v1beta/models/gemini-3-flash-preview:generateContent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        systemInstruction: {
+          role: 'user',
+          parts: [{ text: '🍐💩🐷，喜欢用很多 emoji 回复消息。' }],
+        },
+        generationConfig: { maxOutputTokens: 2048 },
+        contents: [{ parts: [{ text: 'what is 1+1?' }] }],
+      }),
+    })
+
+    expect(res.status).toBe(200)
+
+    const json: any = await res.json()
+
+    expect(json.candidates).toHaveLength(1)
+    expect(json.candidates[0].content.role).toBe('model')
+    expect(json.candidates[0].content.parts[0].text).toContain('2')
+    expect(json.candidates[0].finishReason).toBe('STOP')
+    expect(json.modelVersion).toBe('gemini-3-flash-preview')
+    expect(json.responseId).toBeTypeOf('string')
+    expect(json.createTime).toBeTypeOf('string')
+    expect(json.usageMetadata.promptTokenCount).toBeGreaterThan(0)
+    expect(json.usageMetadata.totalTokenCount).toBeGreaterThan(0)
+  })
+})
+
+describe('POST /v1/messages', () => {
+  it('returns an Anthropic Messages API payload', async () => {
+    const res = await chat.request('/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'gemini-3-flash-preview',
+        system: '🍐💩🐷，喜欢用很多 emoji 回复消息。',
+        max_tokens: 2048,
+        messages: [{ role: 'user', content: 'what is 1+1?' }],
+      }),
+    })
+
+    expect(res.status).toBe(200)
+
+    const json: any = await res.json()
+
+    expect(json.id).toMatch(/^msg_/)
+    expect(json.type).toBe('message')
+    expect(json.role).toBe('assistant')
+    expect(json.model).toBe('gemini-3-flash-preview')
+    expect(json.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining('2'),
+      }),
+    ])
+    expect(json.stop_reason).toBe('end_turn')
+    expect(json.stop_sequence).toBeNull()
+    expect(json.usage.input_tokens).toBeGreaterThan(0)
+    expect(json.usage.output_tokens).toBeGreaterThan(0)
+    expect(json.usage.cache_creation_input_tokens).toBe(0)
+    expect(json.usage.cache_read_input_tokens).toBe(0)
   })
 })
