@@ -6,6 +6,7 @@ const chat = new Hono()
 const DEFAULT_OPENAI_MODEL = 'gpt-5.4'
 const DEFAULT_GEMINI_MODEL = 'gemini-3-flash-preview'
 const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-4-6'
+const ERROR_TEST_MODEL = 'error-test'
 
 const mockResponses = [
   '🙂 你好，这里是一条友好的 mock 回复。',
@@ -349,6 +350,68 @@ function buildAnthropicPayload(model: string, responseText: string, promptText: 
   }
 }
 
+function isErrorTestModel(model: string) {
+  return model === ERROR_TEST_MODEL
+}
+
+function createRequestId() {
+  return createId('req')
+}
+
+function buildOpenAIModelError(model: string) {
+  return {
+    error: {
+      message: `The model \`${model}\` does not exist or you do not have access to it.`,
+      type: 'invalid_request_error',
+      param: null,
+      code: 'model_not_found',
+    },
+  }
+}
+
+function buildGeminiModelError(model: string) {
+  const modelResource = `models/${model}`
+
+  return {
+    error: {
+      code: 400,
+      message: `${modelResource} is not supported for generateContent. Use ListModels to inspect the available models and supported methods.`,
+      status: 'INVALID_ARGUMENT',
+      details: [
+        {
+          '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+          reason: 'MODEL_NOT_SUPPORTED',
+          domain: 'generativelanguage.googleapis.com',
+          metadata: {
+            model: modelResource,
+            method: 'generateContent',
+          },
+        },
+        {
+          '@type': 'type.googleapis.com/google.rpc.Help',
+          links: [
+            {
+              description: 'List available Gemini API models',
+              url: 'https://ai.google.dev/gemini-api/docs/models',
+            },
+          ],
+        },
+      ],
+    },
+  }
+}
+
+function buildAnthropicModelError(model: string, requestId: string) {
+  return {
+    type: 'error',
+    error: {
+      type: 'invalid_request_error',
+      message: `Unsupported model: ${model}. See the models documentation for valid model IDs.`,
+    },
+    request_id: requestId,
+  }
+}
+
 chat.post('/v1/chat/completions', async (c) => {
   const body = (await c.req.json()) as JsonObject
   const model = typeof body.model === 'string' ? body.model : DEFAULT_OPENAI_MODEL
@@ -357,6 +420,12 @@ chat.post('/v1/chat/completions', async (c) => {
   const promptText = getLastPrompt(messages)
   const responseText = buildMockText(c.req.method, c.req.url, model)
   const usage = buildUsage([systemPrompt, promptText].filter(Boolean).join('\n'), responseText)
+
+  if (isErrorTestModel(model)) {
+    const requestId = createRequestId()
+    c.header('x-request-id', requestId)
+    return c.json(buildOpenAIModelError(model), 404)
+  }
 
   if (body.stream !== true) {
     return c.json(buildOpenAIChatResponse(model, responseText, usage))
@@ -449,6 +518,12 @@ chat.post('/v1/responses', async (c) => {
   const promptText = body.input !== undefined ? getLastPrompt(body.input) : ''
   const responseText = buildMockText(c.req.method, c.req.url, model)
 
+  if (isErrorTestModel(model)) {
+    const requestId = createRequestId()
+    c.header('x-request-id', requestId)
+    return c.json(buildOpenAIModelError(model), 404)
+  }
+
   return c.json(buildOpenAIResponsesPayload(body, model, responseText, [instructions, promptText].filter(Boolean).join('\n')))
 })
 
@@ -475,6 +550,10 @@ chat.post('/v1beta/models/*', async (c) => {
   const promptText = body.contents !== undefined ? getLastPrompt(body.contents) : ''
   const responseText = buildMockText(c.req.method, c.req.url, model)
 
+  if (isErrorTestModel(model)) {
+    return c.json(buildGeminiModelError(model), 400)
+  }
+
   return c.json(buildGeminiPayload(model, responseText, [systemPrompt, promptText].filter(Boolean).join('\n')))
 })
 
@@ -484,6 +563,12 @@ chat.post('/v1/messages', async (c) => {
   const systemPrompt = typeof body.system === 'string' ? body.system : extractText(body.system)
   const promptText = body.messages !== undefined ? getLastPrompt(body.messages) : ''
   const responseText = buildMockText(c.req.method, c.req.url, model)
+
+  if (isErrorTestModel(model)) {
+    const requestId = createRequestId()
+    c.header('request-id', requestId)
+    return c.json(buildAnthropicModelError(model, requestId), 400)
+  }
 
   return c.json(buildAnthropicPayload(model, responseText, [systemPrompt, promptText].filter(Boolean).join('\n')))
 })

@@ -52,6 +52,31 @@ describe('POST /v1/chat/completions', () => {
     expect(json.usage.total_tokens).toBe(json.usage.prompt_tokens + json.usage.completion_tokens)
   })
 
+  it('returns an OpenAI-style error for the sentinel model', async () => {
+    const res = await chat.request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'error-test',
+        messages: [{ role: 'user', content: 'Hello' }],
+      }),
+    })
+
+    expect(res.status).toBe(404)
+    expect(res.headers.get('x-request-id')).toMatch(/^req_/)
+
+    const json: any = await res.json()
+
+    expect(json).toEqual({
+      error: {
+        message: 'The model `error-test` does not exist or you do not have access to it.',
+        type: 'invalid_request_error',
+        param: null,
+        code: 'model_not_found',
+      },
+    })
+  })
+
   it('uses the latest default OpenAI model when omitted', async () => {
     const res = await chat.request('/v1/chat/completions', {
       method: 'POST',
@@ -147,6 +172,29 @@ describe('POST /v1/responses', () => {
     expect(json.text.format.type).toBe('text')
     expect(json.usage.total_tokens).toBeGreaterThan(0)
   })
+
+  it('returns the same OpenAI-style error envelope for the sentinel model', async () => {
+    const res = await chat.request('/v1/responses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'error-test',
+        input: [{ role: 'user', content: 'Hello' }],
+      }),
+    })
+
+    expect(res.status).toBe(404)
+    expect(res.headers.get('x-request-id')).toMatch(/^req_/)
+
+    const json: any = await res.json()
+
+    expect(json.error).toEqual({
+      message: 'The model `error-test` does not exist or you do not have access to it.',
+      type: 'invalid_request_error',
+      param: null,
+      code: 'model_not_found',
+    })
+  })
 })
 
 describe('POST /v1beta/models/:model:generateContent', () => {
@@ -179,6 +227,40 @@ describe('POST /v1beta/models/:model:generateContent', () => {
     expect(json.createTime).toBeTypeOf('string')
     expect(json.usageMetadata.promptTokenCount).toBeGreaterThan(0)
     expect(json.usageMetadata.totalTokenCount).toBeGreaterThan(0)
+  })
+
+  it('returns a Google-style error envelope for the sentinel model', async () => {
+    const res = await chat.request('/v1beta/models/error-test:generateContent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: 'Hello' }] }],
+      }),
+    })
+
+    expect(res.status).toBe(400)
+
+    const json: any = await res.json()
+
+    expect(json.error.code).toBe(400)
+    expect(json.error.status).toBe('INVALID_ARGUMENT')
+    expect(json.error.message).toContain('models/error-test')
+    expect(json.error.details).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+          reason: 'MODEL_NOT_SUPPORTED',
+          domain: 'generativelanguage.googleapis.com',
+          metadata: {
+            model: 'models/error-test',
+            method: 'generateContent',
+          },
+        }),
+        expect.objectContaining({
+          '@type': 'type.googleapis.com/google.rpc.Help',
+        }),
+      ]),
+    )
   })
 })
 
@@ -220,5 +302,31 @@ describe('POST /v1/messages', () => {
     expect(json.usage.output_tokens).toBeGreaterThan(0)
     expect(json.usage.cache_creation_input_tokens).toBe(0)
     expect(json.usage.cache_read_input_tokens).toBe(0)
+  })
+
+  it('returns an Anthropic-style error envelope for the sentinel model', async () => {
+    const res = await chat.request('/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'error-test',
+        messages: [{ role: 'user', content: 'Hello' }],
+      }),
+    })
+
+    expect(res.status).toBe(400)
+    expect(res.headers.get('request-id')).toMatch(/^req_/)
+
+    const json: any = await res.json()
+
+    expect(json.type).toBe('error')
+    expect(json.error).toEqual({
+      type: 'invalid_request_error',
+      message: 'Unsupported model: error-test. See the models documentation for valid model IDs.',
+    })
+    expect(json.request_id).toMatch(/^req_/)
   })
 })
