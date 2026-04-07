@@ -56,6 +56,9 @@ const mockResponses = [
 ]
 
 type JsonObject = Record<string, unknown>
+type StreamWriter = {
+  write: (chunk: string) => Promise<unknown>
+}
 
 function isRecord(value: unknown): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -159,6 +162,10 @@ function buildUsage(promptText: string, responseText: string) {
     completion_tokens: completionTokens,
     total_tokens: promptTokens + completionTokens,
   }
+}
+
+async function writeSseEvent(writer: StreamWriter, event: string, data: JsonObject) {
+  await writer.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
 }
 
 function buildOpenAIChatResponse(model: string, responseText: string, usage: ReturnType<typeof buildUsage>) {
@@ -517,6 +524,8 @@ chat.post('/v1/responses', async (c) => {
   const instructions = typeof body.instructions === 'string' ? body.instructions : ''
   const promptText = body.input !== undefined ? getLastPrompt(body.input) : ''
   const responseText = buildMockText(c.req.method, c.req.url, model)
+  const fullPromptText = [instructions, promptText].filter(Boolean).join('\n')
+  const responsePayload = buildOpenAIResponsesPayload(body, model, responseText, fullPromptText)
 
   if (isErrorTestModel(model)) {
     const requestId = createRequestId()
@@ -524,7 +533,111 @@ chat.post('/v1/responses', async (c) => {
     return c.json(buildOpenAIModelError(model), 404)
   }
 
-  return c.json(buildOpenAIResponsesPayload(body, model, responseText, [instructions, promptText].filter(Boolean).join('\n')))
+  if (body.stream !== true) {
+    return c.json(responsePayload)
+  }
+
+  c.header('Content-Type', 'text/event-stream')
+  c.header('Cache-Control', 'no-cache')
+  c.header('Connection', 'keep-alive')
+
+  return stream(c, async (s) => {
+    const message = responsePayload.output[0]
+    const contentPart = message.content[0]
+    const inProgressResponse = {
+      ...responsePayload,
+      status: 'in_progress',
+      completed_at: null,
+      output: [],
+      usage: null,
+    }
+    const inProgressMessage = {
+      id: message.id,
+      type: message.type,
+      status: 'in_progress',
+      content: [],
+      phase: message.phase,
+      role: message.role,
+    }
+    const emptyContentPart = {
+      type: contentPart.type,
+      annotations: contentPart.annotations,
+      logprobs: contentPart.logprobs,
+      text: '',
+    }
+    let sequenceNumber = 0
+
+    await writeSseEvent(s, 'response.created', {
+      type: 'response.created',
+      response: inProgressResponse,
+      sequence_number: sequenceNumber++,
+    })
+
+    await writeSseEvent(s, 'response.in_progress', {
+      type: 'response.in_progress',
+      response: inProgressResponse,
+      sequence_number: sequenceNumber++,
+    })
+
+    await writeSseEvent(s, 'response.output_item.added', {
+      type: 'response.output_item.added',
+      item: inProgressMessage,
+      output_index: 0,
+      sequence_number: sequenceNumber++,
+    })
+
+    await writeSseEvent(s, 'response.content_part.added', {
+      type: 'response.content_part.added',
+      content_index: 0,
+      item_id: message.id,
+      output_index: 0,
+      part: emptyContentPart,
+      sequence_number: sequenceNumber++,
+    })
+
+    for (const char of responseText) {
+      await writeSseEvent(s, 'response.output_text.delta', {
+        type: 'response.output_text.delta',
+        content_index: 0,
+        delta: char,
+        item_id: message.id,
+        output_index: 0,
+        sequence_number: sequenceNumber++,
+      })
+    }
+
+    await writeSseEvent(s, 'response.output_text.done', {
+      type: 'response.output_text.done',
+      content_index: 0,
+      item_id: message.id,
+      output_index: 0,
+      text: responseText,
+      sequence_number: sequenceNumber++,
+    })
+
+    await writeSseEvent(s, 'response.content_part.done', {
+      type: 'response.content_part.done',
+      content_index: 0,
+      item_id: message.id,
+      output_index: 0,
+      part: contentPart,
+      sequence_number: sequenceNumber++,
+    })
+
+    await writeSseEvent(s, 'response.output_item.done', {
+      type: 'response.output_item.done',
+      item: message,
+      output_index: 0,
+      sequence_number: sequenceNumber++,
+    })
+
+    await writeSseEvent(s, 'response.completed', {
+      type: 'response.completed',
+      response: responsePayload,
+      sequence_number: sequenceNumber++,
+    })
+  })
+
 })
 
 chat.post('/v1beta/models/*', async (c) => {

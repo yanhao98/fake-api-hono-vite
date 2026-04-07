@@ -173,6 +173,66 @@ describe('POST /v1/responses', () => {
     expect(json.usage.total_tokens).toBeGreaterThan(0)
   })
 
+  it('streams Responses API events when stream=true', async () => {
+    const res = await chat.request('/v1/responses?trace=1&provider=openai', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-5.4-mini',
+        stream: true,
+        instructions: '喜欢用很多 emoji 回复消息。',
+        input: [{ role: 'user', content: '请用中文告诉我：what is 1+1，what is your model?' }],
+      }),
+    })
+
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toContain('text/event-stream')
+
+    const text = await res.text()
+    const chunks = text
+      .trim()
+      .split('\n\n')
+      .map((chunk) => chunk.trim())
+      .filter(Boolean)
+      .map((chunk) => {
+        const event = chunk.match(/^event: (.+)$/m)?.[1]
+        const dataText = chunk.match(/^data: (.+)$/m)?.[1]
+
+        return {
+          event,
+          data: dataText ? JSON.parse(dataText) : null,
+        }
+      })
+
+    expect(chunks.length).toBeGreaterThan(6)
+    expect(chunks[0].event).toBe('response.created')
+    expect(chunks[0].data?.type).toBe('response.created')
+    expect(chunks[0].data?.response.status).toBe('in_progress')
+    expect(chunks[1].event).toBe('response.in_progress')
+
+    const outputItemAdded = chunks.find((chunk) => chunk.event === 'response.output_item.added')
+    expect(outputItemAdded?.data?.item.type).toBe('message')
+    expect(outputItemAdded?.data?.item.status).toBe('in_progress')
+
+    const deltaEvents = chunks.filter((chunk) => chunk.event === 'response.output_text.delta')
+    expect(deltaEvents.length).toBeGreaterThan(0)
+
+    const streamedText = deltaEvents.map((chunk) => chunk.data?.delta ?? '').join('')
+    expect(streamedText).toContain('POST /v1/responses?trace=1&provider=openai model=gpt-5.4-mini')
+
+    const doneEvent = chunks.find((chunk) => chunk.event === 'response.output_text.done')
+    expect(doneEvent?.data?.text).toContain('POST /v1/responses?trace=1&provider=openai model=gpt-5.4-mini')
+
+    const completedEvent = chunks.at(-1)
+    expect(completedEvent?.event).toBe('response.completed')
+    expect(completedEvent?.data?.response.object).toBe('response')
+    expect(completedEvent?.data?.response.status).toBe('completed')
+    expect(completedEvent?.data?.response.model).toBe('gpt-5.4-mini')
+    expect(completedEvent?.data?.response.output[0].content[0].text).toContain(
+      'POST /v1/responses?trace=1&provider=openai model=gpt-5.4-mini',
+    )
+  })
+
   it('returns the same OpenAI-style error envelope for the sentinel model', async () => {
     const res = await chat.request('/v1/responses', {
       method: 'POST',
