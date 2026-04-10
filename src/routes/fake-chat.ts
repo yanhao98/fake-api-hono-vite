@@ -7,6 +7,7 @@ const DEFAULT_OPENAI_MODEL = 'gpt-5.4'
 const DEFAULT_GEMINI_MODEL = 'gemini-3-flash-preview'
 const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-4-6'
 const ERROR_TEST_MODEL = 'error-test'
+const INCOMPLETE_TEST_MODEL = 'gpt-5.4-incomplete-test'
 
 const mockResponses = [
   '🙂 你好，这里是一条友好的 mock 回复。',
@@ -59,9 +60,26 @@ type JsonObject = Record<string, unknown>
 type StreamWriter = {
   write: (chunk: string) => Promise<unknown>
 }
+type ResponseMessageItem = {
+  id: string
+  type: 'message'
+  status: string
+  content: Array<{
+    type: string
+    annotations: unknown[]
+    logprobs: unknown[]
+    text: string
+  }>
+  phase: 'commentary' | 'final_answer'
+  role: 'assistant'
+}
 
 function isRecord(value: unknown): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isResponseMessageItem(value: unknown): value is ResponseMessageItem {
+  return isRecord(value) && value.type === 'message' && Array.isArray(value.content)
 }
 
 function createId(prefix: string, separator = '_') {
@@ -70,6 +88,18 @@ function createId(prefix: string, separator = '_') {
   }
 
   return `${prefix}${separator}${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`
+}
+
+function createOpaqueToken(length = 14) {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+
+  if (typeof crypto !== 'undefined' && 'getRandomValues' in crypto) {
+    const bytes = new Uint8Array(length)
+    crypto.getRandomValues(bytes)
+    return Array.from(bytes, (value) => alphabet[value % alphabet.length]).join('')
+  }
+
+  return Array.from({ length }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join('')
 }
 
 function getUnixTimestamp() {
@@ -164,6 +194,83 @@ function buildUsage(promptText: string, responseText: string) {
   }
 }
 
+function resolveOpenAIResponsesModel(model: string) {
+  const versionedModels: Record<string, string> = {
+    'gpt-5.4': 'gpt-5.4-2026-03-17',
+    'gpt-5.4-mini': 'gpt-5.4-mini-2026-03-17',
+    'gpt-5.4-nano': 'gpt-5.4-nano-2026-03-17',
+  }
+
+  return versionedModels[model] ?? model
+}
+
+function getReasoningEffort(body: JsonObject) {
+  return isRecord(body.reasoning) && typeof body.reasoning.effort === 'string' ? body.reasoning.effort : 'none'
+}
+
+function estimateReasoningTokens(effort: string) {
+  const tokensByEffort: Record<string, number> = {
+    none: 0,
+    low: 64,
+    medium: 128,
+    high: 256,
+  }
+
+  return tokensByEffort[effort] ?? 0
+}
+
+function buildResponseMessageItem(id: string, responseText: string) {
+  return {
+    id,
+    type: 'message',
+    status: 'completed',
+    content: [
+      {
+        type: 'output_text',
+        annotations: [],
+        logprobs: [],
+        text: responseText,
+      },
+    ],
+    phase: 'final_answer',
+    role: 'assistant',
+  }
+}
+
+function buildResponseReasoningItem(effort: string) {
+  if (effort === 'none') {
+    return null
+  }
+
+  return {
+    id: createId('rs'),
+    type: 'reasoning',
+    encrypted_content: `gAAAAA${createOpaqueToken(160)}`,
+    summary: [],
+  }
+}
+
+function buildIncompleteResponseText(text: string) {
+  const chunks = splitResponseTextForStreaming(text)
+  return chunks.slice(0, Math.max(1, Math.ceil(chunks.length / 2))).join('')
+}
+
+function splitResponseTextForStreaming(text: string) {
+  const chunkPattern = [1, 2, 3, 2]
+  const chunks: string[] = []
+  let patternIndex = 0
+  let cursor = 0
+
+  while (cursor < text.length) {
+    const size = chunkPattern[patternIndex % chunkPattern.length]
+    chunks.push(text.slice(cursor, cursor + size))
+    cursor += size
+    patternIndex += 1
+  }
+
+  return chunks.filter(Boolean)
+}
+
 async function writeSseEvent(writer: StreamWriter, event: string, data: JsonObject) {
   await writer.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
 }
@@ -194,9 +301,15 @@ function buildOpenAIChatResponse(model: string, responseText: string, usage: Ret
 
 function buildOpenAIResponsesPayload(body: JsonObject, model: string, responseText: string, promptText: string) {
   const createdAt = getUnixTimestamp()
-  const outputTokens = estimateTokens(responseText)
+  const resolvedModel = resolveOpenAIResponsesModel(model)
+  const reasoningEffort = getReasoningEffort(body)
+  const reasoningTokens = estimateReasoningTokens(reasoningEffort)
+  const outputTokens = estimateTokens(responseText) + reasoningTokens
   const inputTokens = estimateTokens(promptText)
   const messageId = createId('msg')
+  const reasoningItem = buildResponseReasoningItem(reasoningEffort)
+  const messageItem = buildResponseMessageItem(messageId, responseText)
+  const output = reasoningItem ? [reasoningItem, messageItem] : [messageItem]
 
   return {
     id: createId('resp'),
@@ -211,31 +324,15 @@ function buildOpenAIResponsesPayload(body: JsonObject, model: string, responseTe
     instructions: typeof body.instructions === 'string' ? body.instructions : null,
     max_output_tokens: typeof body.max_output_tokens === 'number' ? body.max_output_tokens : null,
     max_tool_calls: typeof body.max_tool_calls === 'number' ? body.max_tool_calls : null,
-    model,
-    output: [
-      {
-        id: messageId,
-        type: 'message',
-        status: 'completed',
-        content: [
-          {
-            type: 'output_text',
-            annotations: [],
-            logprobs: [],
-            text: responseText,
-          },
-        ],
-        phase: 'final_answer',
-        role: 'assistant',
-      },
-    ],
+    model: resolvedModel,
+    output,
     parallel_tool_calls: body.parallel_tool_calls ?? true,
     presence_penalty: body.presence_penalty ?? 0,
     previous_response_id: typeof body.previous_response_id === 'string' ? body.previous_response_id : null,
     prompt_cache_key: createId('cache'),
     prompt_cache_retention: null,
     reasoning: {
-      effort: isRecord(body.reasoning) && typeof body.reasoning.effort === 'string' ? body.reasoning.effort : 'none',
+      effort: reasoningEffort,
       summary: null,
     },
     safety_identifier: typeof body.safety_identifier === 'string' ? body.safety_identifier : null,
@@ -279,7 +376,7 @@ function buildOpenAIResponsesPayload(body: JsonObject, model: string, responseTe
       },
       output_tokens: outputTokens,
       output_tokens_details: {
-        reasoning_tokens: 0,
+        reasoning_tokens: reasoningTokens,
       },
       total_tokens: inputTokens + outputTokens,
     },
@@ -331,6 +428,12 @@ function buildGeminiPayload(model: string, responseText: string, promptText: str
   }
 }
 
+function buildGeminiModelListPayload() {
+  return {
+    models: geminiModels,
+  }
+}
+
 function buildAnthropicPayload(model: string, responseText: string, promptText: string) {
   const inputTokens = estimateTokens(promptText)
   const outputTokens = estimateTokens(responseText)
@@ -361,6 +464,10 @@ function isErrorTestModel(model: string) {
   return model === ERROR_TEST_MODEL
 }
 
+function isIncompleteTestModel(model: string) {
+  return model === INCOMPLETE_TEST_MODEL
+}
+
 function createRequestId() {
   return createId('req')
 }
@@ -372,6 +479,100 @@ function buildOpenAIModelError(model: string) {
       type: 'invalid_request_error',
       param: null,
       code: 'model_not_found',
+    },
+  }
+}
+
+function buildOpenAIResponsesFailedPayload(body: JsonObject, model: string, promptText: string) {
+  const createdAt = getUnixTimestamp()
+  const inputTokens = estimateTokens(promptText)
+
+  return {
+    id: createId('resp'),
+    object: 'response',
+    created_at: createdAt,
+    status: 'failed',
+    background: body.background ?? false,
+    completed_at: createdAt,
+    error: {
+      code: 'server_error',
+      message: 'Simulated stream failure for `error-test` model.',
+    },
+    frequency_penalty: body.frequency_penalty ?? 0,
+    incomplete_details: null,
+    instructions: typeof body.instructions === 'string' ? body.instructions : null,
+    max_output_tokens: typeof body.max_output_tokens === 'number' ? body.max_output_tokens : null,
+    max_tool_calls: typeof body.max_tool_calls === 'number' ? body.max_tool_calls : null,
+    model,
+    output: [],
+    parallel_tool_calls: body.parallel_tool_calls ?? true,
+    presence_penalty: body.presence_penalty ?? 0,
+    previous_response_id: typeof body.previous_response_id === 'string' ? body.previous_response_id : null,
+    prompt_cache_key: createId('cache'),
+    prompt_cache_retention: null,
+    reasoning: {
+      effort: getReasoningEffort(body),
+      summary: null,
+    },
+    safety_identifier: typeof body.safety_identifier === 'string' ? body.safety_identifier : null,
+    service_tier: 'default',
+    store: body.store ?? false,
+    temperature: typeof body.temperature === 'number' ? body.temperature : 1,
+    text: {
+      format:
+        isRecord(body.text) && isRecord(body.text.format) && typeof body.text.format.type === 'string'
+          ? { type: body.text.format.type }
+          : { type: 'text' },
+      verbosity: isRecord(body.text) && typeof body.text.verbosity === 'string' ? body.text.verbosity : 'medium',
+    },
+    tool_choice: typeof body.tool_choice === 'string' ? body.tool_choice : 'auto',
+    tool_usage: {
+      image_gen: {
+        input_tokens: 0,
+        input_tokens_details: {
+          image_tokens: 0,
+          text_tokens: 0,
+        },
+        output_tokens: 0,
+        output_tokens_details: {
+          image_tokens: 0,
+          text_tokens: 0,
+        },
+        total_tokens: 0,
+      },
+      web_search: {
+        num_requests: 0,
+      },
+    },
+    tools: Array.isArray(body.tools) ? body.tools : [],
+    top_logprobs: typeof body.top_logprobs === 'number' ? body.top_logprobs : 0,
+    top_p: typeof body.top_p === 'number' ? body.top_p : 1,
+    truncation: typeof body.truncation === 'string' ? body.truncation : 'disabled',
+    usage: {
+      input_tokens: inputTokens,
+      input_tokens_details: {
+        cached_tokens: 0,
+      },
+      output_tokens: 0,
+      output_tokens_details: {
+        reasoning_tokens: 0,
+      },
+      total_tokens: inputTokens,
+    },
+    user: typeof body.user === 'string' ? body.user : null,
+    metadata: isRecord(body.metadata) ? body.metadata : {},
+  }
+}
+
+function buildOpenAIResponsesIncompletePayload(body: JsonObject, model: string, responseText: string, promptText: string) {
+  const partialResponseText = buildIncompleteResponseText(responseText)
+  const payload = buildOpenAIResponsesPayload(body, model, partialResponseText, promptText)
+
+  return {
+    ...payload,
+    status: 'incomplete',
+    incomplete_details: {
+      reason: 'max_output_tokens',
     },
   }
 }
@@ -418,6 +619,35 @@ function buildAnthropicModelError(model: string, requestId: string) {
     request_id: requestId,
   }
 }
+
+const geminiModels = [
+  {
+    name: 'models/gemini-3-flash-preview',
+    version: 'preview',
+    displayName: 'Gemini 3 Flash Preview',
+    description: 'Fast preview Gemini model for fake generateContent flows.',
+    inputTokenLimit: 1048576,
+    outputTokenLimit: 65536,
+    supportedGenerationMethods: ['generateContent'],
+    temperature: 1,
+    maxTemperature: 2,
+    topP: 0.95,
+    topK: 40,
+  },
+  {
+    name: 'models/gemini-3-pro-preview',
+    version: 'preview',
+    displayName: 'Gemini 3 Pro Preview',
+    description: 'Higher-quality preview Gemini model for fake generateContent flows.',
+    inputTokenLimit: 1048576,
+    outputTokenLimit: 65536,
+    supportedGenerationMethods: ['generateContent'],
+    temperature: 0.9,
+    maxTemperature: 2,
+    topP: 0.95,
+    topK: 40,
+  },
+]
 
 chat.post('/v1/chat/completions', async (c) => {
   const body = (await c.req.json()) as JsonObject
@@ -518,6 +748,10 @@ chat.post('/v1/chat/completions', async (c) => {
   })
 })
 
+chat.get('/v1beta/models', (c) => {
+  return c.json(buildGeminiModelListPayload())
+})
+
 chat.post('/v1/responses', async (c) => {
   const body = (await c.req.json()) as JsonObject
   const model = typeof body.model === 'string' ? body.model : DEFAULT_OPENAI_MODEL
@@ -525,13 +759,53 @@ chat.post('/v1/responses', async (c) => {
   const promptText = body.input !== undefined ? getLastPrompt(body.input) : ''
   const responseText = buildMockText(c.req.method, c.req.url, model)
   const fullPromptText = [instructions, promptText].filter(Boolean).join('\n')
-  const responsePayload = buildOpenAIResponsesPayload(body, model, responseText, fullPromptText)
 
   if (isErrorTestModel(model)) {
+    if (body.stream === true) {
+      const failedPayload = buildOpenAIResponsesFailedPayload(body, model, fullPromptText)
+      const inProgressResponse = {
+        ...failedPayload,
+        status: 'in_progress',
+        completed_at: null,
+        error: null,
+        usage: null,
+      }
+
+      c.header('Content-Type', 'text/event-stream')
+      c.header('Cache-Control', 'no-cache')
+      c.header('Connection', 'keep-alive')
+
+      return stream(c, async (s) => {
+        let sequenceNumber = 0
+
+        await writeSseEvent(s, 'response.created', {
+          type: 'response.created',
+          response: inProgressResponse,
+          sequence_number: sequenceNumber++,
+        })
+
+        await writeSseEvent(s, 'response.in_progress', {
+          type: 'response.in_progress',
+          response: inProgressResponse,
+          sequence_number: sequenceNumber++,
+        })
+
+        await writeSseEvent(s, 'response.failed', {
+          type: 'response.failed',
+          response: failedPayload,
+          sequence_number: sequenceNumber++,
+        })
+      })
+    }
+
     const requestId = createRequestId()
     c.header('x-request-id', requestId)
     return c.json(buildOpenAIModelError(model), 404)
   }
+
+  const responsePayload = isIncompleteTestModel(model)
+    ? buildOpenAIResponsesIncompletePayload(body, model, responseText, fullPromptText)
+    : buildOpenAIResponsesPayload(body, model, responseText, fullPromptText)
 
   if (body.stream !== true) {
     return c.json(responsePayload)
@@ -542,8 +816,11 @@ chat.post('/v1/responses', async (c) => {
   c.header('Connection', 'keep-alive')
 
   return stream(c, async (s) => {
-    const message = responsePayload.output[0]
+    const message = responsePayload.output.find(isResponseMessageItem) as ResponseMessageItem
+    const reasoningItem = responsePayload.output.find((item) => isRecord(item) && item.type === 'reasoning')
+    const messageOutputIndex = responsePayload.output.findIndex(isResponseMessageItem)
     const contentPart = message.content[0]
+    const streamedResponseText = contentPart.text
     const inProgressResponse = {
       ...responsePayload,
       status: 'in_progress',
@@ -579,10 +856,26 @@ chat.post('/v1/responses', async (c) => {
       sequence_number: sequenceNumber++,
     })
 
+    if (reasoningItem) {
+      await writeSseEvent(s, 'response.output_item.added', {
+        type: 'response.output_item.added',
+        item: reasoningItem,
+        output_index: 0,
+        sequence_number: sequenceNumber++,
+      })
+
+      await writeSseEvent(s, 'response.output_item.done', {
+        type: 'response.output_item.done',
+        item: reasoningItem,
+        output_index: 0,
+        sequence_number: sequenceNumber++,
+      })
+    }
+
     await writeSseEvent(s, 'response.output_item.added', {
       type: 'response.output_item.added',
       item: inProgressMessage,
-      output_index: 0,
+      output_index: messageOutputIndex,
       sequence_number: sequenceNumber++,
     })
 
@@ -590,18 +883,20 @@ chat.post('/v1/responses', async (c) => {
       type: 'response.content_part.added',
       content_index: 0,
       item_id: message.id,
-      output_index: 0,
+      output_index: messageOutputIndex,
       part: emptyContentPart,
       sequence_number: sequenceNumber++,
     })
 
-    for (const char of responseText) {
+    for (const chunk of splitResponseTextForStreaming(streamedResponseText)) {
       await writeSseEvent(s, 'response.output_text.delta', {
         type: 'response.output_text.delta',
         content_index: 0,
-        delta: char,
+        delta: chunk,
         item_id: message.id,
-        output_index: 0,
+        logprobs: [],
+        obfuscation: createOpaqueToken(),
+        output_index: messageOutputIndex,
         sequence_number: sequenceNumber++,
       })
     }
@@ -610,8 +905,9 @@ chat.post('/v1/responses', async (c) => {
       type: 'response.output_text.done',
       content_index: 0,
       item_id: message.id,
-      output_index: 0,
-      text: responseText,
+      logprobs: [],
+      output_index: messageOutputIndex,
+      text: streamedResponseText,
       sequence_number: sequenceNumber++,
     })
 
@@ -619,7 +915,7 @@ chat.post('/v1/responses', async (c) => {
       type: 'response.content_part.done',
       content_index: 0,
       item_id: message.id,
-      output_index: 0,
+      output_index: messageOutputIndex,
       part: contentPart,
       sequence_number: sequenceNumber++,
     })
@@ -627,12 +923,14 @@ chat.post('/v1/responses', async (c) => {
     await writeSseEvent(s, 'response.output_item.done', {
       type: 'response.output_item.done',
       item: message,
-      output_index: 0,
+      output_index: messageOutputIndex,
       sequence_number: sequenceNumber++,
     })
 
-    await writeSseEvent(s, 'response.completed', {
-      type: 'response.completed',
+    const terminalEvent = responsePayload.status === 'incomplete' ? 'response.incomplete' : 'response.completed'
+
+    await writeSseEvent(s, terminalEvent, {
+      type: terminalEvent,
       response: responsePayload,
       sequence_number: sequenceNumber++,
     })
@@ -703,6 +1001,18 @@ const mockModels = [
     id: 'gpt-5.4-nano',
     object: 'model',
     created: 1741737600,
+    owned_by: 'openai',
+  },
+  {
+    id: 'gpt-5.4-incomplete-test',
+    object: 'model',
+    created: 1775491200,
+    owned_by: 'openai',
+  },
+  {
+    id: 'error-test',
+    object: 'model',
+    created: 1775491200,
     owned_by: 'openai',
   },
   {
