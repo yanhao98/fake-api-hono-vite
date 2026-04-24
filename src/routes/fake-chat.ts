@@ -754,6 +754,7 @@ chat.get('/v1beta/models', (c) => {
 
 chat.post('/v1/responses', async (c) => {
   const body = (await c.req.json()) as JsonObject
+  console.log('Received /v1/responses request with body:', body)
   const model = typeof body.model === 'string' ? body.model : DEFAULT_OPENAI_MODEL
   const instructions = typeof body.instructions === 'string' ? body.instructions : ''
   const promptText = body.input !== undefined ? getLastPrompt(body.input) : ''
