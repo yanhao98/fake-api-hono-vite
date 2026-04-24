@@ -758,7 +758,18 @@ chat.post('/v1/responses', async (c) => {
   const model = typeof body.model === 'string' ? body.model : DEFAULT_OPENAI_MODEL
   const instructions = typeof body.instructions === 'string' ? body.instructions : ''
   const promptText = body.input !== undefined ? getLastPrompt(body.input) : ''
-  const responseText = buildMockText(c.req.method, c.req.url, model)
+  // 用 Markdown 包住回显内容，便于前端直接渲染和联调查看请求体。
+  const responseText = [
+    '# Mock Response',
+    '',
+    buildMockText(c.req.method, c.req.url, model),
+    '',
+    '## Request Body',
+    '',
+    '```json',
+    JSON.stringify(body, null, 2),
+    '```',
+  ].join('\n')
   const fullPromptText = [instructions, promptText].filter(Boolean).join('\n')
 
   if (isErrorTestModel(model)) {

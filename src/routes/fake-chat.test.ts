@@ -196,7 +196,12 @@ describe('POST /v1/responses', () => {
     expect(json.output[0].content[0].type).toBe('output_text')
     expect(json.output[0].content[0].text).toBeTypeOf('string')
     expect(json.output[0].content[0].text.length).toBeGreaterThan(0)
+    expect(json.output[0].content[0].text).toContain('# Mock Response')
     expect(json.output[0].content[0].text).toContain('POST /v1/responses?trace=1&provider=openai model=gpt-5.4')
+    expect(json.output[0].content[0].text).toContain('## Request Body')
+    expect(json.output[0].content[0].text).toContain('```json')
+    expect(json.output[0].content[0].text).toContain('"model": "gpt-5.4"')
+    expect(json.output[0].content[0].text).toContain('"instructions": "🍐💩🐷，喜欢用很多 emoji 回复消息。"')
     expect(json.text.format.type).toBe('text')
     expect(json.usage.total_tokens).toBeGreaterThan(0)
   })
@@ -330,14 +335,21 @@ describe('POST /v1/responses', () => {
     expect(deltaEvents[0]?.data?.obfuscation.length).toBeGreaterThan(0)
 
     const streamedText = deltaEvents.map((chunk) => chunk.data?.delta ?? '').join('')
+    expect(streamedText).toContain('# Mock Response')
     expect(streamedText).toContain('POST /v1/responses?trace=1&provider=openai model=gpt-5.4-mini')
+    expect(streamedText).toContain('## Request Body')
+    expect(streamedText).toContain('"model": "gpt-5.4-mini"')
+    expect(streamedText).toContain('"stream": true')
 
     const doneEvent = chunks.find((chunk) => chunk.event === 'response.output_text.done')
     expect(doneEvent?.data?.content_index).toBe(0)
     expect(doneEvent?.data?.item_id).toBe(outputItemAdded?.data?.item.id)
     expect(doneEvent?.data?.output_index).toBe(1)
     expect(doneEvent?.data?.logprobs).toEqual([])
+    expect(doneEvent?.data?.text).toContain('# Mock Response')
     expect(doneEvent?.data?.text).toContain('POST /v1/responses?trace=1&provider=openai model=gpt-5.4-mini')
+    expect(doneEvent?.data?.text).toContain('## Request Body')
+    expect(doneEvent?.data?.text).toContain('"model": "gpt-5.4-mini"')
 
     const contentPartDone = chunks.find((chunk) => chunk.event === 'response.content_part.done')
     expect(contentPartDone?.data?.content_index).toBe(0)
@@ -383,9 +395,12 @@ describe('POST /v1/responses', () => {
     expect(completedEvent?.data?.response.usage.total_tokens).toBe(
       completedEvent?.data?.response.usage.input_tokens + completedEvent?.data?.response.usage.output_tokens,
     )
+    expect(completedEvent?.data?.response.output[1].content[0].text).toContain('# Mock Response')
     expect(completedEvent?.data?.response.output[1].content[0].text).toContain(
       'POST /v1/responses?trace=1&provider=openai model=gpt-5.4-mini',
     )
+    expect(completedEvent?.data?.response.output[1].content[0].text).toContain('## Request Body')
+    expect(completedEvent?.data?.response.output[1].content[0].text).toContain('"model": "gpt-5.4-mini"')
   })
 
   it('streams a failed Responses event sequence for the error-test model', async () => {
